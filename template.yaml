@@ -203,10 +203,11 @@ Resources:
           BOOKINGS_TABLE: !Ref BookingsTable
           PHOTOS_TABLE: !Ref PhotosTable
           PHOTOS_BUCKET: !Ref PhotosBucket
-      Policies: !If
-        - UseExistingRole
-        - !Ref "AWS::NoValue"
-        - - Version: "2012-10-17"
+      Policies:
+        - !If
+          - UseExistingRole
+          - !Ref "AWS::NoValue"
+          - Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: dynamodb:DescribeTable
@@ -235,10 +236,11 @@ Resources:
       Environment:
         Variables:
           PHOTOS_BUCKET: !Ref PhotosBucket
-      Policies: !If
-        - UseExistingRole
-        - !Ref "AWS::NoValue"
-        - - Version: "2012-10-17"
+      Policies:
+        - !If
+          - UseExistingRole
+          - !Ref "AWS::NoValue"
+          - Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: s3:PutObject                    # presigned URL ditandatangani dengan izin role ini
@@ -258,10 +260,11 @@ Resources:
       Environment:
         Variables:
           PHOTOS_TABLE: !Ref PhotosTable
-      Policies: !If
-        - UseExistingRole
-        - !Ref "AWS::NoValue"
-        - - Version: "2012-10-17"
+      Policies:
+        - !If
+          - UseExistingRole
+          - !Ref "AWS::NoValue"
+          - Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: dynamodb:PutItem
@@ -290,10 +293,11 @@ Resources:
       Environment:
         Variables:
           TOPIC_ARN: !Ref AlertTopic
-      Policies: !If
-        - UseExistingRole
-        - !Ref "AWS::NoValue"
-        - - SNSPublishMessagePolicy:
+      Policies:
+        - !If
+          - UseExistingRole
+          - !Ref "AWS::NoValue"
+          - SNSPublishMessagePolicy:
               TopicName: !GetAtt AlertTopic.TopicName
       LoggingConfig:
         LogGroup: !Ref NotifierLogGroup
