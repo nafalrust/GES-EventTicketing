@@ -1,5 +1,5 @@
 // Server HTTP lokal untuk development: menjalankan handler Lambda yang SAMA
-// tanpa deploy, plus frontend statis dari folder web/. Routing path ditiru di sini
+// tanpa deploy, plus frontend statis dari folder frontend/. Routing path ditiru di sini
 // (di AWS dilakukan CloudFront: /api/health -> HealthFunction, dst).
 //
 //	go run ./cmd/local                 # buka http://localhost:8000
@@ -92,7 +92,7 @@ func main() {
 	} else {
 		log.Print("PHOTOS_BUCKET kosong: /api/photos/upload-url tidak aktif")
 	}
-	mux.Handle("/", http.FileServer(http.Dir("web"))) // frontend
+	mux.Handle("/", http.FileServer(http.Dir(env("WEB_DIR", "../frontend")))) // frontend
 
 	port := env("PORT", "8000")
 	log.Printf("mode lokal listening on :%s", port)

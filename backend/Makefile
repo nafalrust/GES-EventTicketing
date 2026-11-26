@@ -56,7 +56,7 @@ deploy: build
 
 # Unggah frontend ke S3 lalu bersihkan cache CloudFront
 web-deploy:
-	aws s3 sync web/ s3://$(call out,WebBucketName)/ --delete
+	aws s3 sync ../frontend/ s3://$(call out,WebBucketName)/ --delete
 	aws cloudfront create-invalidation --distribution-id $(call out,DistributionId) --paths "/*" >/dev/null
 	@echo "Buka: $(call out,SiteUrl)"
 
