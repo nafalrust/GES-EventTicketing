@@ -52,7 +52,7 @@ build:
 
 deploy: build
 	@test -n "$(ROLE_ARN)" || echo "PERINGATAN: ROLE_ARN kosong -> SAM akan membuat role sendiri (butuh iam:CreateRole)"
-	sam deploy --parameter-overrides "LambdaRoleArn=$(ROLE_ARN)" "AlertEmail=$(ALERT_EMAIL)"
+	sam deploy --no-confirm-changeset --role-arn "$(ROLE_ARN)" --parameter-overrides "LambdaRoleArn=$(ROLE_ARN)" $(if $(ALERT_EMAIL),"AlertEmail=$(ALERT_EMAIL)")
 
 # Unggah frontend ke S3 lalu bersihkan cache CloudFront
 web-deploy:
