@@ -1,0 +1,22 @@
+{
+  "version": "2.0",
+  "routeKey": "$default",
+  "rawPath": "/api/photos/upload-url",
+  "rawQueryString": "event_id=demo-001&content_type=image/jpeg",
+  "queryStringParameters": {
+    "event_id": "demo-001",
+    "content_type": "image/jpeg"
+  },
+  "headers": {
+    "host": "abc.lambda-url.us-east-1.on.aws"
+  },
+  "requestContext": {
+    "http": {
+      "method": "GET",
+      "path": "/api/photos/upload-url",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1"
+    }
+  },
+  "isBase64Encoded": false
+}

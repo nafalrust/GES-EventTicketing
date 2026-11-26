@@ -1,0 +1,10 @@
+{
+  "version": "0",
+  "id": "demo",
+  "detail-type": "Scheduled Event",
+  "source": "aws.events",
+  "time": "2026-11-26T17:00:00Z",
+  "region": "us-east-1",
+  "resources": [],
+  "detail": {}
+}

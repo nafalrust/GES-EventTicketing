@@ -1,0 +1,33 @@
+{
+  "Records": [
+    {
+      "eventID": "1",
+      "eventName": "INSERT",
+      "eventSource": "aws:dynamodb",
+      "awsRegion": "us-east-1",
+      "dynamodb": {
+        "Keys": {
+          "booking_id": {
+            "S": "demo-001#21123456TK00001"
+          }
+        },
+        "NewImage": {
+          "booking_id": {
+            "S": "demo-001#21123456TK00001"
+          },
+          "event_id": {
+            "S": "demo-001"
+          },
+          "nim": {
+            "S": "21123456TK00001"
+          },
+          "status": {
+            "S": "booked"
+          }
+        },
+        "SequenceNumber": "111",
+        "StreamViewType": "NEW_AND_OLD_IMAGES"
+      }
+    }
+  ]
+}

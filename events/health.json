@@ -1,0 +1,18 @@
+{
+  "version": "2.0",
+  "routeKey": "$default",
+  "rawPath": "/api/health",
+  "rawQueryString": "",
+  "headers": {
+    "host": "abc.lambda-url.us-east-1.on.aws"
+  },
+  "requestContext": {
+    "http": {
+      "method": "GET",
+      "path": "/api/health",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1"
+    }
+  },
+  "isBase64Encoded": false
+}
