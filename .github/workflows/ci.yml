@@ -7,11 +7,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: backend/go.mod
       - name: Format check
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
@@ -24,6 +27,9 @@ jobs:
 
   template:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/setup-sam@v2
