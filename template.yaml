@@ -1,0 +1,573 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Campus Event Ticketing (Track C - Serverless, Go) - CloudFront + Lambda Function URL + DynamoDB + S3 (tahap inisiasi)
+
+Parameters:
+  LambdaRoleArn:
+    Type: String
+    Default: ""
+    Description: >
+      ARN role eksekusi Lambda yang SUDAH ADA (mis. LabRole). Kosong = SAM membuat satu role
+      per fungsi dengan izin minimal (butuh iam:CreateRole).
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Email penerima notifikasi booking (opsional). Harus konfirmasi lewat email dari SNS.
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    Description: Lama penyimpanan log CloudWatch (hari).
+
+Conditions:
+  UseExistingRole: !Not [!Equals [!Ref LambdaRoleArn, ""]]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Globals:
+  Function:
+    Runtime: provided.al2023      # Go berjalan sebagai custom runtime (binary bernama "bootstrap")
+    Architectures: [arm64]        # Graviton; build di Makefile pakai GOARCH=arm64
+    Handler: bootstrap
+    Timeout: 10                   # eksplisit, bukan default 3 detik
+    MemorySize: 128
+
+Resources:
+  # ============ Data (3 tabel; lihat model data di dokumen) ============
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete        # lab. Ganti ke Retain untuk produksi.
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  BookingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: booking_id    # "<event_id>#<nim>" -> satu NIM hanya bisa booking satu kali per event
+          AttributeType: S
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: nim
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: booking_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: by-event          # daftar peserta / absensi per event
+          KeySchema:
+            - AttributeName: event_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: by-nim            # "booking saya"
+          KeySchema:
+            - AttributeName: nim
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES   # sumber event untuk NotifierFunction
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  PhotosTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: photo_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+        - AttributeName: photo_id
+          KeyType: RANGE
+
+  # ============ Frontend statis (S3 privat, hanya CloudFront yang boleh baca) ============
+  WebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete        # catatan: bucket harus kosong saat stack dihapus (make destroy mengosongkannya)
+    UpdateReplacePolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${WebBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ============ Foto event (S3 privat; unggah via presigned URL, tampil via CloudFront) ============
+  PhotosBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete        # bucket harus kosong saat stack dihapus (make destroy mengosongkannya)
+    UpdateReplacePolicy: Delete
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:               # browser mengunggah langsung ke S3 -> butuh CORS untuk PUT
+        CorsRules:
+          - AllowedMethods: [PUT]
+            AllowedOrigins: ["*"]      # tidak bisa merujuk domain CloudFront (referensi melingkar); URL presigned yang membatasi akses
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  PhotosBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PhotosBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontReadPhotos
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${PhotosBucket.Arn}/photos/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ============ Fungsi: SATU FUNGSI PER TUGAS ============
+  HealthFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile       # menjalankan target build-HealthFunction di Makefile
+    Properties:
+      CodeUri: .
+      Role: !If [UseExistingRole, !Ref LambdaRoleArn, !Ref "AWS::NoValue"]
+      LoggingConfig:
+        LogGroup: !Ref HealthLogGroup
+      FunctionUrlConfig:
+        AuthType: AWS_IAM         # tidak publik; hanya CloudFront (OAC) yang diberi izin di bawah
+
+  AwsCheckFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      MemorySize: 256
+      Role: !If [UseExistingRole, !Ref LambdaRoleArn, !Ref "AWS::NoValue"]
+      Environment:
+        Variables:
+          EVENTS_TABLE: !Ref EventsTable
+          BOOKINGS_TABLE: !Ref BookingsTable
+          PHOTOS_TABLE: !Ref PhotosTable
+          PHOTOS_BUCKET: !Ref PhotosBucket
+      Policies: !If
+        - UseExistingRole
+        - !Ref "AWS::NoValue"
+        - - Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:DescribeTable
+                Resource:
+                  - !GetAtt EventsTable.Arn
+                  - !GetAtt BookingsTable.Arn
+                  - !GetAtt PhotosTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:DeleteItem]
+                Resource: !GetAtt EventsTable.Arn       # hanya untuk item probe
+              - Effect: Allow
+                Action: s3:ListBucket                   # dibutuhkan HeadBucket
+                Resource: !GetAtt PhotosBucket.Arn
+      LoggingConfig:
+        LogGroup: !Ref AwsCheckLogGroup
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+
+  PhotoUrlFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Role: !If [UseExistingRole, !Ref LambdaRoleArn, !Ref "AWS::NoValue"]
+      Environment:
+        Variables:
+          PHOTOS_BUCKET: !Ref PhotosBucket
+      Policies: !If
+        - UseExistingRole
+        - !Ref "AWS::NoValue"
+        - - Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject                    # presigned URL ditandatangani dengan izin role ini
+                Resource: !Sub "${PhotosBucket.Arn}/photos/*"
+      LoggingConfig:
+        LogGroup: !Ref PhotoUrlLogGroup
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+
+  PhotoIndexerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Role: !If [UseExistingRole, !Ref LambdaRoleArn, !Ref "AWS::NoValue"]
+      Environment:
+        Variables:
+          PHOTOS_TABLE: !Ref PhotosTable
+      Policies: !If
+        - UseExistingRole
+        - !Ref "AWS::NoValue"
+        - - Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt PhotosTable.Arn
+      LoggingConfig:
+        LogGroup: !Ref PhotoIndexerLogGroup
+      Events:
+        PhotoUploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref PhotosBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: photos/
+
+  NotifierFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Role: !If [UseExistingRole, !Ref LambdaRoleArn, !Ref "AWS::NoValue"]
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref AlertTopic
+      Policies: !If
+        - UseExistingRole
+        - !Ref "AWS::NoValue"
+        - - SNSPublishMessagePolicy:
+              TopicName: !GetAtt AlertTopic.TopicName
+      LoggingConfig:
+        LogGroup: !Ref NotifierLogGroup
+      Events:
+        TicketChanges:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt BookingsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumRetryAttempts: 3
+            BisectBatchOnFunctionError: true
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  JanitorFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: .
+      Role: !If [UseExistingRole, !Ref LambdaRoleArn, !Ref "AWS::NoValue"]
+      LoggingConfig:
+        LogGroup: !Ref JanitorLogGroup
+      Events:
+        Nightly:
+          Type: Schedule            # EventBridge RULE (events:*), bukan EventBridge Scheduler
+          Properties:
+            Schedule: "cron(0 17 * * ? *)"   # 17:00 UTC = 00:00 WIB
+            Description: "Job malam (tahap inisiasi - hanya log)"
+
+  # ============ Notifikasi ============
+  AlertTopic:
+    Type: AWS::SNS::Topic
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ============ CloudFront: satu domain, routing per path ============
+  WebOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-web-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  LambdaOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-lambda-oac"
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} - frontend + API"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: web
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebOac.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: health-fn
+            DomainName: !Select [2, !Split ["/", !GetAtt HealthFunctionUrl.FunctionUrl]]
+            OriginAccessControlId: !GetAtt LambdaOac.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+          - Id: awscheck-fn
+            DomainName: !Select [2, !Split ["/", !GetAtt AwsCheckFunctionUrl.FunctionUrl]]
+            OriginAccessControlId: !GetAtt LambdaOac.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+          - Id: photourl-fn
+            DomainName: !Select [2, !Split ["/", !GetAtt PhotoUrlFunctionUrl.FunctionUrl]]
+            OriginAccessControlId: !GetAtt LambdaOac.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+          - Id: photos
+            DomainName: !GetAtt PhotosBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebOac.Id       # OAC tipe s3 yang sama dengan frontend
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:                # frontend statis
+          TargetOriginId: web
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # Managed-CachingOptimized
+        CacheBehaviors:
+          - PathPattern: /api/health
+            TargetOriginId: health-fn
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # Managed-CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # Managed-AllViewerExceptHostHeader
+          - PathPattern: /api/health/aws
+            TargetOriginId: awscheck-fn
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          - PathPattern: /api/photos/upload-url        # query string (event_id, content_type) diteruskan ke Lambda
+            TargetOriginId: photourl-fn
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          - PathPattern: /photos/*                     # tampilkan foto dari S3
+            TargetOriginId: photos
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+  # Izin agar CloudFront (distribusi INI saja) boleh memanggil Function URL.
+  # Dua statement: InvokeFunctionUrl + InvokeFunction (keduanya dibutuhkan untuk function URL).
+  HealthUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealthFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+      FunctionUrlAuthType: AWS_IAM
+
+  HealthInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealthFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  AwsCheckUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AwsCheckFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+      FunctionUrlAuthType: AWS_IAM
+
+  AwsCheckInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AwsCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  PhotoUrlUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PhotoUrlFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+      FunctionUrlAuthType: AWS_IAM
+
+  PhotoUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PhotoUrlFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ============ Log & alarm ============
+  HealthLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+  AwsCheckLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+  PhotoUrlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+  PhotoIndexerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+  NotifierLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+  JanitorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+
+  AwsCheckErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: AwsCheckFunction mengembalikan error
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AwsCheckFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  PhotoIndexerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: PhotoIndexerFunction gagal mencatat metadata foto
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PhotoIndexerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  NotifierErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: NotifierFunction gagal memproses stream
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref NotifierFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  SiteUrl:
+    Description: Frontend + API + foto (satu domain CloudFront)
+    Value: !Sub "https://${Distribution.DomainName}"
+  DistributionId:
+    Value: !Ref Distribution
+  WebBucketName:
+    Description: Bucket frontend (make web-deploy mengisi ini)
+    Value: !Ref WebBucket
+  PhotosBucketName:
+    Value: !Ref PhotosBucket
+  EventsTableName:
+    Value: !Ref EventsTable
+  BookingsTableName:
+    Value: !Ref BookingsTable
+  PhotosTableName:
+    Value: !Ref PhotosTable
+  TopicArn:
+    Value: !Ref AlertTopic
