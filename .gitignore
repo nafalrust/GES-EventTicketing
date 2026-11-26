@@ -1,0 +1,14 @@
+docs
+build/
+.aws-sam/
+.env
+*.pem
+*.test
+*.out
+out.json
+out2.json
+# kredensial AWS & screenshot-nya
+credentials
+.aws/
+aws-credentials*
+*.png
